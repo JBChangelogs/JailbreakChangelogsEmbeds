@@ -1,5 +1,5 @@
 <!doctype html><html><head><meta charset="utf-8">
-<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;800&family=Inter:wght@500;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;800&family=Inter:wght@500;600;800&display=swap" rel="stylesheet">
 <style>
   @font-face { font-family:jbw; src:url(jbwingdings.ttf); }
   body { margin:0; width:1920px; height:1080px; overflow:hidden; font-family:Archivo,sans-serif; background:#101014; }
@@ -13,11 +13,14 @@
         transform-origin:0 0; transform:rotateX(42deg) rotateZ(-33deg);
         box-shadow:-30px 40px 60px #000c; outline:2px solid #ffffff14; }
   .card { position:absolute; left:52px; bottom:64px; display:flex; align-items:center; gap:40px; padding:32px 56px 32px 32px;
+          box-sizing:border-box; max-width:720px;
           font-family:Inter,sans-serif; border:2px solid #34383d; border-radius:32px;
           background:#17181d;
           box-shadow:0 18px 60px -18px color-mix(in srgb, var(--underglow, transparent) 75%, transparent),
                      0 8px 28px -10px color-mix(in srgb, var(--underglow, transparent) 45%, transparent); }
-  .avatar { width:200px; height:200px; border-radius:24px; object-fit:cover; }
+  .avatar { width:200px; height:200px; border-radius:24px; object-fit:cover; flex-shrink:0; }
+  .card > div { min-width:0; }
+  .name, .handle { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .name { color:#fff; font-size:68px; font-weight:800; line-height:1.1; }
   .handle { color:#95a1b2; font-size:40px; font-weight:500; margin:6px 0 22px; }
   .pill { display:inline-block; font-size:30px; font-weight:600; padding:12px 22px; border-radius:14px; border:2px solid #ffffff26; }
@@ -52,4 +55,13 @@
 <div class="stage"><img class="shot" src="shot.png"></div>
 <div class="text"><h1>{title}</h1><p>{subtitle}</p></div>
 <!-- {card} -->
+<script>
+  window.layoutDone = Promise.all([window.layoutDone, document.fonts.load('800 68px Inter'), document.fonts.load('500 40px Inter')]).then(() => {
+    for (const el of document.querySelectorAll('.name, .handle')) {
+      let size = parseFloat(getComputedStyle(el).fontSize);
+      const min = size * 0.6;
+      while (el.scrollWidth > el.clientWidth && size > min) el.style.fontSize = --size + 'px';
+    }
+  });
+</script>
 </body></html>
