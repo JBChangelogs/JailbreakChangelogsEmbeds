@@ -10,6 +10,7 @@ use crate::{
 };
 
 const TEMPLATE: &str = include_str!("template.html");
+const VEHICLE_FONT: &[u8] = include_bytes!("jbwingdings.ttf");
 
 pub fn render(s: &Session, cfg: &Config, embed: &Embed, scale: f64) -> Result<Vec<u8>> {
     let tab = &s.tab;
@@ -35,10 +36,11 @@ pub fn render(s: &Session, cfg: &Config, embed: &Embed, scale: f64) -> Result<Ve
         .replace("/* {css} */", &embed.css)
         .replace("<!-- {card} -->", &card);
     fs::write(s.tmp.join("embed.html"), html)?;
+    fs::write(s.tmp.join("jbwingdings.ttf"), VEHICLE_FONT)?;
 
     set_viewport(tab, scale)?;
     anyhow::ensure!(goto(tab, &format!("file:///{}", s.tmp.join("embed.html").display()))?, "template didn't load");
-    tab.evaluate("document.fonts.ready.then(() => true)", true).context("loading fonts")?;
+    tab.evaluate("Promise.all([window.layoutDone, document.fonts.ready]).then(() => true)", true).context("loading fonts")?;
     tab.capture_screenshot(CaptureScreenshotFormatOption::Png, None, None, true).context("screenshotting template")
 }
 

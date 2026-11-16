@@ -1,8 +1,10 @@
 <!doctype html><html><head><meta charset="utf-8">
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;800&family=Inter:wght@500;800&display=swap" rel="stylesheet">
 <style>
-  body { margin:0; width:1920px; height:1080px; overflow:hidden; font-family:Archivo,sans-serif;
-         background:#101014 radial-gradient(#ffffff1a 2px, transparent 2.5px) 0 0/40px 40px; }
+  @font-face { font-family:jbw; src:url(jbwingdings.ttf); }
+  body { margin:0; width:1920px; height:1080px; overflow:hidden; font-family:Archivo,sans-serif; background:#101014; }
+  .vehicles { position:absolute; top:0; left:-40px; display:grid; grid-template-columns:repeat(25, 80px); grid-auto-rows:64px;
+              place-items:center; font-family:jbw; color:#75b9f512; }
   .text { position:absolute; left:52px; top:40px; width:820px; color:#fff; text-transform:uppercase; }
   h1 { margin:0 0 30px; font-size:66px; font-weight:800; line-height:1.08; }
   p  { margin:0; font-size:26px; font-weight:500; letter-spacing:.5px; }
@@ -17,6 +19,32 @@
   .pill { display:inline-block; background:#1d7cf2; color:#fff; font-size:32px; font-weight:500; padding:8px 26px; border-radius:999px; }
   /* {css} */
 </style></head><body>
+<div class="vehicles"></div>
+<script>
+  window.layoutDone = document.fonts.load('100px jbw').then(() => {
+    const ctx = document.createElement('canvas').getContext('2d');
+    ctx.font = '100px jbw';
+    const size = glyph => {
+      const m = ctx.measureText(glyph);
+      const w = m.actualBoundingBoxLeft + m.actualBoundingBoxRight;
+      const h = m.actualBoundingBoxAscent + m.actualBoundingBoxDescent;
+      return 100 * Math.min(56 / w, 26 / h) + 'px';
+    };
+    let seed = 7;
+    const random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    const v = document.querySelector('.vehicles');
+    for (let row = 0; row < 17; row++)
+      for (let col = 0; col < 25; col++) {
+        const span = document.createElement('span');
+        if (row % 2) span.style.transform = 'translateX(40px)';
+        if (random() < 0.5) {
+          span.textContent = 'abcdefghijklmnopqrstuvwxyz'[Math.floor(random() * 26)];
+          span.style.fontSize = size(span.textContent);
+        }
+        v.append(span);
+      }
+  });
+</script>
 <div class="stage"><img class="shot" src="shot.png"></div>
 <div class="text"><h1>{title}</h1><p>{subtitle}</p></div>
 <!-- {card} -->

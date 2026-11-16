@@ -253,7 +253,6 @@ name = "embedgen"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "form_urlencoded",
  "headless_chrome",
  "serde",
  "serde_json",
