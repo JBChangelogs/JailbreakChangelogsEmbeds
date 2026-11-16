@@ -34,7 +34,8 @@ pub fn render(s: &Session, cfg: &Config, embed: &Embed, scale: f64) -> Result<Ve
         .replace("{title}", &escape(&title))
         .replace("{subtitle}", &escape(&embed.subtitle))
         .replace("/* {css} */", &embed.css)
-        .replace("<!-- {card} -->", &card);
+        .replace("<!-- {card} -->", &card)
+        .replace("{seed}", &seed(&embed.route).to_string());
     fs::write(s.tmp.join("embed.html"), html)?;
     fs::write(s.tmp.join("jbwingdings.ttf"), VEHICLE_FONT)?;
 
@@ -42,6 +43,10 @@ pub fn render(s: &Session, cfg: &Config, embed: &Embed, scale: f64) -> Result<Ve
     anyhow::ensure!(goto(tab, &format!("file:///{}", s.tmp.join("embed.html").display()))?, "template didn't load");
     tab.evaluate("Promise.all([window.layoutDone, document.fonts.ready]).then(() => true)", true).context("loading fonts")?;
     tab.capture_screenshot(CaptureScreenshotFormatOption::Png, None, None, true).context("screenshotting template")
+}
+
+fn seed(route: &str) -> u32 {
+    route.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 2147483646 + 1
 }
 
 fn page_title(s: &Session, cfg: &Config) -> Result<String> {
