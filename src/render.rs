@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use headless_chrome::protocol::cdp::{Emulation, Page::CaptureScreenshotFormatOption, DOM::RGBA};
 
 use crate::{
-    browser::{goto, set_viewport, settle, wait_for_images, Session},
+    browser::{goto, set_viewport, settle, wait_for_content, Session},
     config::{Config, Embed},
     profile::profile_card,
 };
@@ -23,7 +23,7 @@ pub fn render(s: &Session, cfg: &Config, embed: &Embed, scale: f64) -> Result<Ve
     if !goto(tab, &format!("{}{}", cfg.base_url, embed.route))? {
         eprintln!("  warning: {} didn't finish loading, continuing", embed.route);
     }
-    wait_for_images(tab)?;
+    wait_for_content(tab, &cfg.loading)?;
     settle(tab, Duration::from_millis(embed.delay_ms.unwrap_or(cfg.delay_ms)))?;
 
     let title = if embed.title.is_empty() { page_title(s, cfg)? } else { embed.title.clone() };

@@ -87,14 +87,29 @@ pub fn settle(tab: &Tab, max: Duration) -> Result<()> {
     Ok(())
 }
 
-pub fn wait_for_images(tab: &Tab) -> Result<()> {
-    let loaded = "[...document.images].filter(i => i.width > 2 && i.checkVisibility() && i.getBoundingClientRect().top < innerHeight).every(i => i.complete)";
-    for _ in 0..20 {
-        if tab.evaluate(loaded, false)?.value == Some(true.into()) {
+pub fn wait_for_content(tab: &Tab, loading: &[String]) -> Result<()> {
+    if !loading.is_empty() {
+        let selector = serde_json::to_string(&loading.join(", "))?;
+        let gone = format!(
+            "![...document.querySelectorAll({selector})].some(e => e.checkVisibility() && e.getBoundingClientRect().top < innerHeight && e.getBoundingClientRect().bottom > 0)"
+        );
+        wait_until(tab, &gone, "content")?;
+    }
+    wait_until(
+        tab,
+        "[...document.images].filter(i => i.width > 2 && i.checkVisibility() && i.getBoundingClientRect().top < innerHeight).every(i => i.complete)",
+        "images",
+    )
+}
+
+fn wait_until(tab: &Tab, expr: &str, what: &str) -> Result<()> {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        if tab.evaluate(expr, false)?.value == Some(true.into()) {
             return Ok(());
         }
-        sleep(Duration::from_millis(500));
+        sleep(Duration::from_millis(100));
     }
-    eprintln!("  warning: images still loading after 10s, screenshotting anyway");
+    eprintln!("  warning: {what} still loading after 10s, screenshotting anyway");
     Ok(())
 }

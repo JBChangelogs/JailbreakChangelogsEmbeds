@@ -11,6 +11,8 @@ pub struct Config {
     #[serde(default)]
     pub hide: Vec<String>,
     #[serde(default)]
+    pub loading: Vec<String>,
+    #[serde(default)]
     pub site_name: String,
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,

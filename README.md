@@ -69,6 +69,7 @@ Each command takes an optional config path, e.g. `cargo run --release -- serve p
 | `concurrency` | Browsers running at once. |
 | `dismiss_buttons` | Buttons clicked before screenshotting, matched by text or aria-label. |
 | `hide` | CSS selectors hidden before screenshotting. |
+| `loading` | CSS selectors for loading placeholders; screenshots wait until none are on screen. |
 | `embeds` | Pages to pregenerate. `title` defaults to the page's own title. Optional: `user` (Discord ID for a profile card), `delay_ms`, `css`, `transparent`. |
 
 ## Docker
