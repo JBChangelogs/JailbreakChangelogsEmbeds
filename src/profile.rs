@@ -9,6 +9,10 @@ pub fn profile_card(tab: &Tab, id: &str) -> Result<String> {
     anyhow::ensure!(goto(tab, &format!("https://api.jailbreakchangelogs.com/v2/users/{id}"))?, "user API didn't load");
     let body = tab.evaluate("document.body.innerText", false)?.value.context("empty API response")?;
     let u: serde_json::Value = serde_json::from_str(body.as_str().unwrap_or_default()).context("parsing user JSON")?;
+    if !u.is_object() || u.get("detail").is_some() {
+        eprintln!("  no profile card for {id}: {u}");
+        return Ok(String::new());
+    }
 
     let field = |k: &str| u[k].as_str().filter(|s| !s.is_empty() && *s != "None").map(str::to_string);
     let color = |k: &str| u[k].as_u64().or_else(|| u[k].as_str()?.parse().ok()).map(|c| c as u32 & 0xffffff);
