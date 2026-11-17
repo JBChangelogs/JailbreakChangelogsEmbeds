@@ -52,7 +52,8 @@ fn seed(route: &str) -> u32 {
 fn page_title(s: &Session, cfg: &Config) -> Result<String> {
     let t = s.tab.evaluate("document.querySelector('meta[property=\"og:title\"]')?.content || document.title", false)?.value;
     let t = t.and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-    Ok(strip_site_name(&t, &cfg.site_name).to_string())
+    let t = strip_site_name(&t, &cfg.site_name);
+    Ok(strip_site_name(t, "Roblox Jailbreak").to_string())
 }
 
 fn strip_site_name<'a>(title: &'a str, site: &str) -> &'a str {
@@ -110,5 +111,6 @@ mod tests {
         assert_eq!(strip_site_name("Season 30: Darkest Winter", site), "Season 30: Darkest Winter");
         assert_eq!(strip_site_name("Jailbreak Changelogs", site), "Jailbreak Changelogs");
         assert_eq!(strip_site_name("x - Jailbreak Changelogs", ""), "x - Jailbreak Changelogs");
+        assert_eq!(strip_site_name("HyperShift (HyperChrome) | Roblox Jailbreak", "Roblox Jailbreak"), "HyperShift (HyperChrome)");
     }
 }

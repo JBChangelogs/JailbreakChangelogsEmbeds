@@ -39,22 +39,34 @@ fn handle(req: &Request, cfg: &Config, worker: usize, session: &mut Option<Sessi
     if *req.method() != Method::Get {
         return text(405, "GET only");
     }
-    let path = req.url().split('?').next().unwrap_or_default();
-
-    if let Some(route) = path.strip_prefix("/og").and_then(|p| p.strip_suffix(".png")) {
-        let route = if route.is_empty() { "/" } else { route };
-        if !is_route(route) {
+    if let Some(route) = og_route(req.url()) {
+        if !is_route(&route) {
             return text(404, "not found");
         }
-        return png(render_on(session, worker, cfg, &og_embed(cfg, route), 1.0));
+        return png(render_on(session, worker, cfg, &og_embed(cfg, &route), 1.0));
     }
-    pregenerated(path, cfg)
+    pregenerated(req.url().split('?').next().unwrap_or_default(), cfg)
+}
+
+/// `/og/a/b.png?x=1` or `/og/a/b?x=1.png` -> `/a/b?x=1`. Browsers never send a raw `#`,
+/// so fragments come in as `%23` and are turned back into `#` here.
+fn og_route(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("/og")?;
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let (path, query) = match path.strip_suffix(".png") {
+        Some(path) => (path, query),
+        None => (path, query.strip_suffix(".png")?),
+    };
+    let path = if path.is_empty() { "/" } else { path };
+    let route = if query.is_empty() { path.to_string() } else { format!("{path}?{query}") };
+    Some(route.replace("%23", "#"))
 }
 
 fn og_embed(cfg: &Config, route: &str) -> Embed {
     let listed = |r: &str| cfg.embeds.iter().find(|e| e.route == r);
-    let user = route.strip_prefix("/users/").filter(|id| is_discord_id(id));
-    let text_from = listed(route).or_else(|| user.and(listed("/")));
+    let base = route.split(['?', '#']).next().unwrap_or(route);
+    let user = base.strip_prefix("/users/").filter(|id| is_discord_id(id));
+    let text_from = listed(route).or_else(|| listed(base)).or_else(|| user.and(listed("/")));
     Embed {
         route: route.into(),
         title: text_from.map(|e| e.title.clone()).unwrap_or_default(),
@@ -105,4 +117,23 @@ fn text(code: u16, msg: &str) -> Resp {
 
 fn with_header(resp: Resp, name: &str, value: &str) -> Resp {
     resp.with_header(Header::from_bytes(name, value).unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::og_route;
+
+    #[test]
+    fn og_routes() {
+        let r = |u| og_route(u);
+        assert_eq!(r("/og.png").as_deref(), Some("/"));
+        assert_eq!(r("/og/values.png").as_deref(), Some("/values"));
+        assert_eq!(r("/og/item/HyperChrome/HyperShift?tab=comments.png").as_deref(), Some("/item/HyperChrome/HyperShift?tab=comments"));
+        assert_eq!(r("/og/item/HyperChrome/HyperShift.png?tab=comments").as_deref(), Some("/item/HyperChrome/HyperShift?tab=comments"));
+        assert_eq!(r("/og/values%23top.png").as_deref(), Some("/values#top"));
+        assert_eq!(r("/og/values?a=1%23top.png").as_deref(), Some("/values?a=1#top"));
+        assert_eq!(r("/og/values"), None);
+        assert_eq!(r("/og/values?a=1"), None);
+        assert_eq!(r("/values.png"), None);
+    }
 }
