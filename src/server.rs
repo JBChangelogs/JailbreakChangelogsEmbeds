@@ -36,8 +36,16 @@ pub fn serve(cfg: Config) -> Result<()> {
 }
 
 fn handle(req: &Request, cfg: &Config, worker: usize, session: &mut Option<Session>) -> Resp {
-    if *req.method() != Method::Get {
-        return text(405, "GET only");
+    // Preserve Content-Length even above tiny_http's default chunking threshold.
+    with_header(route(req, cfg, worker, session).with_chunked_threshold(usize::MAX), "Access-Control-Allow-Origin", "*")
+}
+
+fn route(req: &Request, cfg: &Config, worker: usize, session: &mut Option<Session>) -> Resp {
+    if *req.method() == Method::Options {
+        return with_header(text(204, ""), "Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+    }
+    if !matches!(req.method(), Method::Get | Method::Head) {
+        return with_header(text(405, "GET or HEAD only"), "Allow", "GET, HEAD, OPTIONS");
     }
     if let Some(route) = og_route(req.url()) {
         if !is_route(&route) {
@@ -121,7 +129,76 @@ fn with_header(resp: Resp, name: &str, value: &str) -> Resp {
 
 #[cfg(test)]
 mod tests {
-    use super::og_route;
+    use super::*;
+    use tiny_http::{HTTPVersion, TestRequest};
+
+    fn wire(response: Resp, head: bool) -> String {
+        let mut output = Vec::new();
+        response.raw_print(&mut output, HTTPVersion(1, 1), &[], head, None).unwrap();
+        String::from_utf8(output).unwrap()
+    }
+
+    #[test]
+    fn public_image_metadata() {
+        let out = std::env::temp_dir().join(format!("embedgen-metadata-{}", std::process::id()));
+        fs::create_dir_all(&out).unwrap();
+        let data = vec![b'x'; 40_000];
+        fs::write(out.join("values.png"), &data).unwrap();
+        fs::write(out.join("embeds.mp4"), &data).unwrap();
+        let cfg: Config = serde_json::from_value(serde_json::json!({
+            "base_url": "https://jailbreakchangelogs.com", "out_dir": out,
+            "delay_ms": 0, "dismiss_buttons": [],
+            "embeds": [{"route": "/values", "file": "values.png"}]
+        })).unwrap();
+        let mut session = None;
+        for (path, content_type) in [("/values.png", "image/png"), ("/embeds.mp4", "video/mp4")] {
+            for method in [Method::Get, Method::Head] {
+                let head = method == Method::Head;
+                let request: Request = TestRequest::new().with_method(method).with_path(path)
+                    .with_header(Header::from_bytes("Origin", "http://localhost:5500").unwrap()).into();
+                let output = wire(handle(&request, &cfg, 0, &mut session), head);
+                let (headers, body) = output.split_once("\r\n\r\n").unwrap();
+                assert!(headers.starts_with("HTTP/1.1 200"));
+                let headers = headers.to_ascii_lowercase();
+                assert!(headers.contains(&format!("content-type: {content_type}\r\n")));
+                assert!(headers.contains("content-length: 40000"));
+                assert!(headers.contains("access-control-allow-origin: *"));
+                assert!(!headers.contains("transfer-encoding"));
+                assert_eq!(body.len(), if head { 0 } else { data.len() });
+            }
+        }
+        for (method, path, status) in [
+            (Method::Options, "/og/values.png", 204),
+            (Method::Post, "/og/values.png", 405),
+            (Method::Head, "/missing.png", 404),
+            (Method::Head, "/og//invalid.png", 404),
+        ] {
+            let request: Request = TestRequest::new().with_method(method.clone()).with_path(path).into();
+            let output = wire(handle(&request, &cfg, 0, &mut session), method == Method::Head);
+            assert!(output.starts_with(&format!("HTTP/1.1 {status}")));
+            assert!(output.to_ascii_lowercase().contains("access-control-allow-origin: *"));
+            if method == Method::Options {
+                assert!(output.contains("Access-Control-Allow-Methods: GET, HEAD, OPTIONS"));
+            }
+            if method == Method::Post {
+                assert!(output.contains("Allow: GET, HEAD, OPTIONS"));
+            }
+        }
+        assert!(session.is_none());
+        fs::remove_dir_all(out).unwrap();
+    }
+
+    #[test]
+    fn rendered_png_metadata_retains_cache_policy() {
+        let data = vec![b'x'; 40_000];
+        let response = with_header(png(Ok(data)).with_chunked_threshold(usize::MAX), "Access-Control-Allow-Origin", "*");
+        let output = wire(response, true);
+        let (headers, body) = output.split_once("\r\n\r\n").unwrap();
+        assert!(headers.contains("Content-Type: image/png"));
+        assert!(headers.contains("Content-Length: 40000"));
+        assert!(headers.contains("Cache-Control: public, max-age=86400"));
+        assert!(body.is_empty());
+    }
 
     #[test]
     fn og_routes() {

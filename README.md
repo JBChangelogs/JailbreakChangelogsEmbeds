@@ -41,6 +41,8 @@ Each command takes an optional config path, e.g. `cargo run --release -- serve p
 | `GET /og/<route>.png` | Embed for any page, e.g. `/og/values.png`, `/og/users/<id>.png`, `/og.png` for the home page. Public and cacheable. |
 | `GET /<file>` | A pregenerated image from `out_dir`. |
 
+Both routes also accept `HEAD`, returning the same image metadata without a body. Responses include `Content-Type`, `Content-Length`, and public CORS headers so browser lightboxes can read image details. `OPTIONS` advertises the supported methods. On-demand `HEAD` requests render the image just like `GET` to determine its exact size.
+
 ## Configuration
 
 `embeds.json` is not committed. A minimal one:
