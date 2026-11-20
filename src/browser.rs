@@ -102,6 +102,11 @@ pub fn wait_for_content(tab: &Tab, loading: &[String]) -> Result<()> {
     )
 }
 
+/// A shared theme is fetched after the page loads, then set as inline CSS variables on `<html>`.
+pub fn wait_for_theme(tab: &Tab) -> Result<()> {
+    wait_until(tab, "!!document.documentElement.style.getPropertyValue('--color-primary-bg')", "theme")
+}
+
 fn wait_until(tab: &Tab, expr: &str, what: &str) -> Result<()> {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
