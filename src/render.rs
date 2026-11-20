@@ -6,7 +6,7 @@ use headless_chrome::protocol::cdp::{Emulation, Page::CaptureScreenshotFormatOpt
 use crate::{
     browser::{goto, set_viewport, settle, wait_for_content, Session},
     config::{Config, Embed},
-    profile::profile_card,
+    profile::{profile_card, theme_card},
 };
 
 const TEMPLATE: &str = include_str!("template.html");
@@ -15,9 +15,10 @@ const VEHICLE_FONT: &[u8] = include_bytes!("jbwingdings.ttf");
 pub fn render(s: &Session, cfg: &Config, embed: &Embed, scale: f64) -> Result<Vec<u8>> {
     let tab = &s.tab;
     set_viewport(tab, 1.0)?;
-    let card = match &embed.user {
-        Some(id) => profile_card(tab, id)?,
-        None => String::new(),
+    let card = match (&embed.user, &embed.theme) {
+        (Some(id), _) => profile_card(tab, id)?,
+        (None, Some(code)) => theme_card(tab, code)?,
+        (None, None) => String::new(),
     };
 
     if !goto(tab, &format!("{}{}", cfg.base_url, embed.route))? {

@@ -83,8 +83,14 @@ fn og_embed(cfg: &Config, route: &str) -> Embed {
         transparent: listed(route).is_some_and(|e| e.transparent),
         css: listed(route).map(|e| e.css.clone()).unwrap_or_default(),
         user: user.map(str::to_string),
+        theme: query_param(route, "theme").filter(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_alphanumeric())).map(str::to_string),
         file: String::new(),
     }
+}
+
+fn query_param<'a>(route: &'a str, key: &str) -> Option<&'a str> {
+    let query = route.split_once('?')?.1.split('#').next()?;
+    query.split('&').find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
 }
 
 fn pregenerated(path: &str, cfg: &Config) -> Resp {
@@ -131,6 +137,14 @@ fn with_header(resp: Resp, name: &str, value: &str) -> Resp {
 mod tests {
     use super::*;
     use tiny_http::{HTTPVersion, TestRequest};
+
+    #[test]
+    fn query_params() {
+        assert_eq!(query_param("/?theme=4DVB9KBE", "theme"), Some("4DVB9KBE"));
+        assert_eq!(query_param("/values?a=1&theme=X#top", "theme"), Some("X"));
+        assert_eq!(query_param("/?themes=X", "theme"), None);
+        assert_eq!(query_param("/values", "theme"), None);
+    }
 
     fn wire(response: Resp, head: bool) -> String {
         let mut output = Vec::new();

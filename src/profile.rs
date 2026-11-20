@@ -1,23 +1,67 @@
 use anyhow::{Context, Result};
 use headless_chrome::Tab;
+use serde_json::Value;
 
 use crate::{browser::goto, render::escape};
 
 const DEFAULT_ACCENT: u32 = 0x1d7cf2;
 
-pub fn profile_card(tab: &Tab, id: &str) -> Result<String> {
-    anyhow::ensure!(goto(tab, &format!("https://api.jailbreakchangelogs.com/v2/users/{id}"))?, "user API didn't load");
+/// GETs an API path; None when it answers with an error like `{"detail": "Not Found"}`.
+fn api(tab: &Tab, path: &str) -> Result<Option<Value>> {
+    anyhow::ensure!(goto(tab, &format!("https://api.jailbreakchangelogs.com{path}"))?, "{path} didn't load");
     let body = tab.evaluate("document.body.innerText", false)?.value.context("empty API response")?;
-    let u: serde_json::Value = serde_json::from_str(body.as_str().unwrap_or_default()).context("parsing user JSON")?;
-    if !u.is_object() || u.get("detail").is_some() {
-        eprintln!("  no profile card for {id}: {u}");
-        return Ok(String::new());
+    let v: Value = serde_json::from_str(body.as_str().unwrap_or_default()).with_context(|| format!("parsing {path}"))?;
+    if !v.is_object() || v.get("detail").is_some() {
+        eprintln!("  no card for {path}: {v}");
+        return Ok(None);
     }
+    Ok(Some(v))
+}
+
+fn display_name(u: &Value) -> Option<&str> {
+    let field = |k: &str| u[k].as_str().filter(|s| !s.is_empty() && *s != "None");
+    field("global_name").or_else(|| field("username"))
+}
+
+pub fn theme_card(tab: &Tab, code: &str) -> Result<String> {
+    let Some(t) = api(tab, &format!("/v2/themes/shared/{code}"))? else { return Ok(String::new()) };
+    let var = |k: &str, fallback: &str| css_value(t["vars"][k].as_str().unwrap_or_default()).unwrap_or(fallback).to_string();
+    let (bg, accent) = (var("--color-primary-bg", "#101014"), var("--color-highlight", "#1d7cf2"));
+    let (button, button_text) = (var("--color-form-button", &accent), var("--color-form-button-text", "#fff"));
+
+    let label = t["label"].as_str().unwrap_or(code);
+    let author = match t["user_id"].as_str() {
+        Some(id) => api(tab, &format!("/v2/users/{id}"))?.and_then(|u| display_name(&u).map(str::to_string)),
+        None => None,
+    };
+    let icon = t["icon"].as_str().filter(|i| i.bytes().all(|b| b.is_ascii_alphanumeric() || b == b':' || b == b'-')).unwrap_or("lucide:palette");
+    let icon_color = if accent.starts_with('#') { accent.replace('#', "%23") } else { "white".into() };
+    let icon_url = format!("https://api.iconify.design/{}.svg?color={icon_color}", icon.replacen(':', "/", 1));
+
+    Ok(format!(
+        "<div class=\"card\" style=\"--underglow:{accent}\"><div class=\"avatar\" style=\"background:{bg};display:grid;place-items:center;outline:2px solid #ffffff14\">\
+         <img src=\"{}\" style=\"width:110px;height:110px\"></div><div><div class=\"name\">{}</div><div class=\"handle\">{}</div>\
+         <span class=\"pill\" style=\"background:{button};color:{button_text}\">Theme {}</span></div></div>",
+        escape(&icon_url),
+        escape(label),
+        escape(&author.map(|a| format!("by {a}")).unwrap_or_default()),
+        escape(code)
+    ))
+}
+
+/// A theme colour is only used if it's a plain colour value, so it can't inject other CSS.
+fn css_value(s: &str) -> Option<&str> {
+    let ok = !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b" #(),.%-".contains(&b));
+    ok.then_some(s)
+}
+
+pub fn profile_card(tab: &Tab, id: &str) -> Result<String> {
+    let Some(u) = api(tab, &format!("/v2/users/{id}"))? else { return Ok(String::new()) };
 
     let field = |k: &str| u[k].as_str().filter(|s| !s.is_empty() && *s != "None").map(str::to_string);
     let color = |k: &str| u[k].as_u64().or_else(|| u[k].as_str()?.parse().ok()).map(|c| c as u32 & 0xffffff);
     let username = field("username").with_context(|| format!("no user {id}"))?;
-    let name = field("global_name").unwrap_or_else(|| username.clone());
+    let name = display_name(&u).unwrap_or(&username).to_string();
     let avatar = field("custom_avatar")
         .filter(|_| u["settings_v2"]["custom_avatar"].as_bool() == Some(true))
         .or_else(|| field("avatar").map(|a| format!("https://cdn.discordapp.com/avatars/{id}/{a}.png?size=512")))
@@ -70,7 +114,16 @@ fn luminance(c: u32) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::text_color;
+    use super::{css_value, text_color};
+
+    #[test]
+    fn only_plain_css_colours() {
+        assert_eq!(css_value("#ff7a1a"), Some("#ff7a1a"));
+        assert_eq!(css_value("hsl(260, 3%, 18%)"), Some("hsl(260, 3%, 18%)"));
+        assert_eq!(css_value("red;background:url(x)"), None);
+        assert_eq!(css_value("\"><script>"), None);
+        assert_eq!(css_value(""), None);
+    }
 
     #[test]
     fn picks_readable_text() {
