@@ -1,4 +1,16 @@
-use std::{fs, io::Cursor, sync::Arc, thread};
+use std::{
+    collections::HashSet,
+    fs,
+    hash::{DefaultHasher, Hash, Hasher},
+    io::Cursor,
+    path::{Path, PathBuf},
+    sync::{
+        mpsc::{sync_channel, Receiver, SyncSender},
+        Arc, Mutex,
+    },
+    thread,
+    time::Duration,
+};
 
 use anyhow::Result;
 use tiny_http::{Header, Method, Request, Response, Server};
@@ -11,19 +23,73 @@ use crate::{
 
 type Resp = Response<Cursor<Vec<u8>>>;
 
+// ponytail: fixed sizes; make them config if pregeneration traffic outgrows them.
+/// Browsers that only work the pregenerate queue, so it never holds up real embed requests.
+const PREGEN_WORKERS: usize = 2;
+/// Requests beyond this many waiting renders get a 503 instead of piling up.
+const PREGEN_QUEUE: usize = 512;
+
+/// Routes waiting to be pregenerated, deduplicated so a burst of the same link renders once.
+pub struct Pregen {
+    tx: SyncSender<String>,
+    pending: Mutex<HashSet<String>>,
+}
+
+impl Pregen {
+    fn new() -> (Self, Receiver<String>) {
+        let (tx, rx) = sync_channel(PREGEN_QUEUE);
+        (Self { tx, pending: Mutex::default() }, rx)
+    }
+
+    fn enqueue(&self, route: String) -> Resp {
+        if is_fresh(&cache_path(&route)) {
+            return text(200, "cached");
+        }
+        if !self.pending.lock().unwrap().insert(route.clone()) {
+            return text(202, "queued");
+        }
+        match self.tx.try_send(route.clone()) {
+            Ok(()) => text(202, "queued"),
+            Err(_) => {
+                self.pending.lock().unwrap().remove(&route);
+                text(503, "pregenerate queue full")
+            }
+        }
+    }
+}
+
 pub fn serve(cfg: Config) -> Result<()> {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
     let server = Arc::new(Server::http(format!("0.0.0.0:{port}")).map_err(|e| anyhow::anyhow!(e))?);
     println!("listening on http://localhost:{port}");
 
+    thread::spawn(|| loop {
+        prune(&cache_dir(), CACHE_TTL, CACHE_MAX_BYTES);
+        thread::sleep(Duration::from_secs(300));
+    });
+
     let cfg = Arc::new(cfg);
+    let (pregen, rx) = Pregen::new();
+    let (pregen, rx) = (Arc::new(pregen), Arc::new(Mutex::new(rx)));
+    for i in 0..PREGEN_WORKERS {
+        let (cfg, pregen, rx) = (cfg.clone(), pregen.clone(), rx.clone());
+        thread::spawn(move || {
+            let (worker, mut session) = (cfg.concurrency + i, None);
+            loop {
+                let Ok(route) = rx.lock().unwrap().recv() else { return };
+                let _ = cached_render(&mut session, worker, &cfg, &route);
+                pregen.pending.lock().unwrap().remove(&route);
+            }
+        });
+    }
+
     let workers: Vec<_> = (0..cfg.concurrency)
         .map(|worker| {
-            let (server, cfg) = (server.clone(), cfg.clone());
+            let (server, cfg, pregen) = (server.clone(), cfg.clone(), pregen.clone());
             thread::spawn(move || {
                 let mut session = None;
                 for req in server.incoming_requests() {
-                    let resp = handle(&req, &cfg, worker, &mut session);
+                    let resp = handle(&req, &cfg, &pregen, worker, &mut session);
                     let _ = req.respond(resp);
                 }
             })
@@ -35,25 +101,88 @@ pub fn serve(cfg: Config) -> Result<()> {
     Ok(())
 }
 
-fn handle(req: &Request, cfg: &Config, worker: usize, session: &mut Option<Session>) -> Resp {
+fn handle(req: &Request, cfg: &Config, pregen: &Pregen, worker: usize, session: &mut Option<Session>) -> Resp {
     // Preserve Content-Length even above tiny_http's default chunking threshold.
-    with_header(route(req, cfg, worker, session).with_chunked_threshold(usize::MAX), "Access-Control-Allow-Origin", "*")
+    with_header(route(req, cfg, pregen, worker, session).with_chunked_threshold(usize::MAX), "Access-Control-Allow-Origin", "*")
 }
 
-fn route(req: &Request, cfg: &Config, worker: usize, session: &mut Option<Session>) -> Resp {
+fn route(req: &Request, cfg: &Config, pregen: &Pregen, worker: usize, session: &mut Option<Session>) -> Resp {
     if *req.method() == Method::Options {
         return with_header(text(204, ""), "Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
     }
     if !matches!(req.method(), Method::Get | Method::Head) {
         return with_header(text(405, "GET or HEAD only"), "Allow", "GET, HEAD, OPTIONS");
     }
+    // `/pregenerate/og/...png` takes the same URL as an embed, renders it in the background and answers straight away.
+    if let Some(rest) = req.url().strip_prefix("/pregenerate") {
+        return match og_route(rest) {
+            Some(route) if is_route(&route) => pregen.enqueue(route),
+            _ => text(404, "not found"),
+        };
+    }
     if let Some(route) = og_route(req.url()) {
         if !is_route(&route) {
             return text(404, "not found");
         }
-        return png(render_on(session, worker, cfg, &og_embed(cfg, &route), 1.0));
+        return png(cached_render(session, worker, cfg, &route));
     }
     pregenerated(req.url().split('?').next().unwrap_or_default(), cfg)
+}
+
+fn cached_render(session: &mut Option<Session>, worker: usize, cfg: &Config, route: &str) -> Result<Vec<u8>> {
+    let cached = cache_path(route);
+    if is_fresh(&cached) {
+        if let Ok(data) = fs::read(&cached) {
+            return Ok(data);
+        }
+    }
+    let result = render_on(session, worker, cfg, &og_embed(cfg, route), 1.0);
+    if let Ok(data) = &result {
+        // Written then renamed, so another worker never reads half a file.
+        let tmp = cached.with_extension(format!("{worker}.tmp"));
+        let _ = fs::create_dir_all(cache_dir()).and_then(|_| fs::write(&tmp, data)).and_then(|_| fs::rename(&tmp, &cached));
+    }
+    result
+}
+
+/// Rendered og images are kept on disk this long, then deleted by `prune`.
+const CACHE_TTL: Duration = Duration::from_secs(3 * 60 * 60);
+// ponytail: fixed cap with oldest-first eviction; make it configurable if the disk gets roomier.
+const CACHE_MAX_BYTES: u64 = 1 << 30;
+
+/// In the container's temp dir, so a redeploy (and any template change) starts it empty.
+fn cache_dir() -> PathBuf {
+    std::env::temp_dir().join("embedgen-cache")
+}
+
+fn cache_path(route: &str) -> PathBuf {
+    let mut h = DefaultHasher::new();
+    route.hash(&mut h);
+    cache_dir().join(format!("{:016x}.png", h.finish()))
+}
+
+fn is_fresh(path: &Path) -> bool {
+    fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age < CACHE_TTL)
+}
+
+/// Drops expired renders, then the oldest ones until the cache fits under `max_bytes`.
+fn prune(dir: &Path, ttl: Duration, max_bytes: u64) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut files: Vec<_> = entries
+        .flatten()
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some((m.modified().ok()?, m.len(), e.path()))
+        })
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut total = 0;
+    for (modified, len, path) in files {
+        total += len;
+        if total > max_bytes || modified.elapsed().map_or(true, |age| age >= ttl) {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 /// `/og/a/b.png?x=1` or `/og/a/b?x=1.png` -> `/a/b?x=1`. Browsers never send a raw `#`,
@@ -171,12 +300,13 @@ mod tests {
             "embeds": [{"route": "/values", "file": "values.png"}]
         })).unwrap();
         let mut session = None;
+        let (pregen, queue) = Pregen::new();
         for (path, content_type) in [("/values.png", "image/png"), ("/embeds.mp4", "video/mp4")] {
             for method in [Method::Get, Method::Head] {
                 let head = method == Method::Head;
                 let request: Request = TestRequest::new().with_method(method).with_path(path)
                     .with_header(Header::from_bytes("Origin", "http://localhost:5500").unwrap()).into();
-                let output = wire(handle(&request, &cfg, 0, &mut session), head);
+                let output = wire(handle(&request, &cfg, &pregen, 0, &mut session), head);
                 let (headers, body) = output.split_once("\r\n\r\n").unwrap();
                 assert!(headers.starts_with("HTTP/1.1 200"));
                 let headers = headers.to_ascii_lowercase();
@@ -192,9 +322,14 @@ mod tests {
             (Method::Post, "/og/values.png", 405),
             (Method::Head, "/missing.png", 404),
             (Method::Head, "/og//invalid.png", 404),
+            (Method::Get, "/pregenerate/og//invalid.png", 404),
+            (Method::Get, "/pregenerate/values", 404),
+            (Method::Get, "/pregenerate/og/embedgen-test.png?share=A", 202),
+            (Method::Get, "/pregenerate/og/embedgen-test.png?share=A", 202),
+            (Method::Get, "/pregenerate/og/embedgen-test.png?share=B", 202),
         ] {
             let request: Request = TestRequest::new().with_method(method.clone()).with_path(path).into();
-            let output = wire(handle(&request, &cfg, 0, &mut session), method == Method::Head);
+            let output = wire(handle(&request, &cfg, &pregen, 0, &mut session), method == Method::Head);
             assert!(output.starts_with(&format!("HTTP/1.1 {status}")));
             assert!(output.to_ascii_lowercase().contains("access-control-allow-origin: *"));
             if method == Method::Options {
@@ -204,7 +339,16 @@ mod tests {
                 assert!(output.contains("Allow: GET, HEAD, OPTIONS"));
             }
         }
+        // the repeated share=A was deduplicated; nothing rendered on the request thread
+        assert_eq!(queue.try_iter().collect::<Vec<_>>(), ["/embedgen-test?share=A", "/embedgen-test?share=B"]);
         assert!(session.is_none());
+        // an already cached render isn't queued again
+        let cached = cache_path("/embedgen-test?share=C");
+        fs::create_dir_all(cache_dir()).unwrap();
+        fs::write(&cached, b"png").unwrap();
+        let request: Request = TestRequest::new().with_path("/pregenerate/og/embedgen-test.png?share=C").into();
+        assert!(wire(handle(&request, &cfg, &pregen, 0, &mut session), false).starts_with("HTTP/1.1 200"));
+        fs::remove_file(cached).unwrap();
         fs::remove_dir_all(out).unwrap();
     }
 
@@ -218,6 +362,24 @@ mod tests {
         assert!(headers.contains("Content-Length: 40000"));
         assert!(headers.contains("Cache-Control: public, max-age=86400"));
         assert!(body.is_empty());
+    }
+
+    #[test]
+    fn prunes_cache() {
+        let dir = std::env::temp_dir().join(format!("embedgen-prune-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["old", "mid", "new"] {
+            fs::write(dir.join(name), [0u8; 10]).unwrap();
+            thread::sleep(Duration::from_millis(20));
+        }
+        // 25 bytes fits the two newest files
+        prune(&dir, Duration::from_secs(60), 25);
+        let left = |n: &str| dir.join(n).exists();
+        assert!(!left("old") && left("mid") && left("new"));
+        prune(&dir, Duration::ZERO, u64::MAX);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir_all(dir).unwrap();
+        assert_ne!(cache_path("/values?share=A"), cache_path("/values?share=B"));
     }
 
     #[test]
