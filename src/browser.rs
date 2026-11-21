@@ -77,7 +77,7 @@ pub fn settle(tab: &Tab, max: Duration) -> Result<()> {
     sleep(Duration::from_millis(300));
     while start.elapsed() < max {
         let busy = tab.evaluate(
-            "document.getAnimations().some(a => a.playState === 'running' && a.effect?.getComputedTiming().endTime !== Infinity)",
+            "[document, ...[...document.querySelectorAll('*')].map(e => e.shadowRoot).filter(Boolean)].flatMap(r => r.getAnimations()).some(a => a.playState === 'running' && a.effect?.getComputedTiming().endTime !== Infinity)",
             false,
         )?;
         if busy.value != Some(true.into()) {
