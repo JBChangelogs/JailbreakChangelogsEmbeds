@@ -83,9 +83,15 @@ fn og_embed(cfg: &Config, route: &str) -> Embed {
         transparent: listed(route).is_some_and(|e| e.transparent),
         css: listed(route).map(|e| e.css.clone()).unwrap_or_default(),
         user: user.map(str::to_string),
-        theme: query_param(route, "theme").filter(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_alphanumeric())).map(str::to_string),
+        theme: code_param(route, "theme"),
+        share: code_param(route, "share").filter(|_| base == "/values/calculator"),
+        trade_ad: base.strip_prefix("/trading/ad/").filter(|id| is_discord_id(id)).map(str::to_string),
         file: String::new(),
     }
+}
+
+fn code_param(route: &str, key: &str) -> Option<String> {
+    query_param(route, key).filter(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_alphanumeric())).map(str::to_string)
 }
 
 fn query_param<'a>(route: &'a str, key: &str) -> Option<&'a str> {

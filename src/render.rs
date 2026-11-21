@@ -6,7 +6,7 @@ use headless_chrome::protocol::cdp::{Emulation, Page::CaptureScreenshotFormatOpt
 use crate::{
     browser::{goto, set_viewport, settle, wait_for_content, wait_for_theme, Session},
     config::{Config, Embed},
-    profile::{profile_card, theme_card},
+    profile::{profile_card, theme_card, trade_ad_card, trade_card},
 };
 
 const TEMPLATE: &str = include_str!("template.html");
@@ -15,24 +15,22 @@ const VEHICLE_FONT: &[u8] = include_bytes!("jbwingdings.ttf");
 pub fn render(s: &Session, cfg: &Config, embed: &Embed, scale: f64) -> Result<Vec<u8>> {
     let tab = &s.tab;
     set_viewport(tab, 1.0)?;
-    let card = match (&embed.user, &embed.theme) {
-        (Some(id), _) => profile_card(tab, id)?,
-        (None, Some(code)) => theme_card(tab, code)?,
+    let trade = match (&embed.share, &embed.trade_ad) {
+        (Some(code), _) => trade_card(tab, code)?,
+        (None, Some(id)) => trade_ad_card(tab, id)?,
         (None, None) => String::new(),
     };
-
-    if !goto(tab, &format!("{}{}", cfg.base_url, embed.route))? {
-        eprintln!("  warning: {} didn't finish loading, continuing", embed.route);
-    }
-    wait_for_content(tab, &cfg.loading)?;
-    if embed.theme.is_some() {
-        wait_for_theme(tab)?;
-    }
-    settle(tab, Duration::from_millis(embed.delay_ms.unwrap_or(cfg.delay_ms)))?;
-
-    let title = if embed.title.is_empty() { page_title(s, cfg)? } else { embed.title.clone() };
-    clean_page(s, cfg)?;
-    fs::write(s.tmp.join("shot.png"), screenshot_page(s, embed.transparent)?)?;
+    // A shared trade is drawn on its own, so the page itself isn't needed.
+    let (card, title) = if !trade.is_empty() {
+        (trade, embed.title.clone())
+    } else {
+        let card = match (&embed.user, &embed.theme) {
+            (Some(id), _) => profile_card(tab, id)?,
+            (None, Some(code)) => theme_card(tab, code)?,
+            (None, None) => String::new(),
+        };
+        (card, screenshot_route(s, cfg, embed)?)
+    };
 
     let html = TEMPLATE
         .replace("{title}", &escape(&title))
@@ -47,6 +45,24 @@ pub fn render(s: &Session, cfg: &Config, embed: &Embed, scale: f64) -> Result<Ve
     anyhow::ensure!(goto(tab, &format!("file:///{}", s.tmp.join("embed.html").display()))?, "template didn't load");
     tab.evaluate("Promise.all([window.layoutDone, document.fonts.ready]).then(() => true)", true).context("loading fonts")?;
     tab.capture_screenshot(CaptureScreenshotFormatOption::Png, None, None, true).context("screenshotting template")
+}
+
+/// Loads the route, saves its screenshot as shot.png and returns its title.
+fn screenshot_route(s: &Session, cfg: &Config, embed: &Embed) -> Result<String> {
+    let tab = &s.tab;
+    if !goto(tab, &format!("{}{}", cfg.base_url, embed.route))? {
+        eprintln!("  warning: {} didn't finish loading, continuing", embed.route);
+    }
+    wait_for_content(tab, &cfg.loading)?;
+    if embed.theme.is_some() {
+        wait_for_theme(tab)?;
+    }
+    settle(tab, Duration::from_millis(embed.delay_ms.unwrap_or(cfg.delay_ms)))?;
+
+    let title = if embed.title.is_empty() { page_title(s, cfg)? } else { embed.title.clone() };
+    clean_page(s, cfg)?;
+    fs::write(s.tmp.join("shot.png"), screenshot_page(s, embed.transparent)?)?;
+    Ok(title)
 }
 
 fn seed(route: &str) -> u32 {

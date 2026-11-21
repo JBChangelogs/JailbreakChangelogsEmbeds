@@ -8,10 +8,20 @@ const DEFAULT_ACCENT: u32 = 0x1d7cf2;
 
 /// GETs an API path; None when it answers with an error like `{"detail": "Not Found"}`.
 fn api(tab: &Tab, path: &str) -> Result<Option<Value>> {
+    api_as(tab, path, None)
+}
+
+/// With a token, the path is fetched again from inside the API's own origin with it attached,
+/// so the token only ever goes to the API and never to the pages screenshotted later.
+fn api_as(tab: &Tab, path: &str, token: Option<&str>) -> Result<Option<Value>> {
     anyhow::ensure!(goto(tab, &format!("https://api.jailbreakchangelogs.com{path}"))?, "{path} didn't load");
-    let body = tab.evaluate("document.body.innerText", false)?.value.context("empty API response")?;
+    let read = match token {
+        Some(t) => format!("fetch(location.href, {{ headers: {{ Authorization: {} }} }}).then(r => r.text())", serde_json::to_string(t)?),
+        None => "document.body.innerText".into(),
+    };
+    let body = tab.evaluate(&read, token.is_some())?.value.context("empty API response")?;
     let v: Value = serde_json::from_str(body.as_str().unwrap_or_default()).with_context(|| format!("parsing {path}"))?;
-    if !v.is_object() || v.get("detail").is_some() {
+    if !v.is_object() || v.get("detail").is_some() || v.get("error").is_some() {
         eprintln!("  no card for {path}: {v}");
         return Ok(None);
     }
@@ -47,6 +57,124 @@ pub fn theme_card(tab: &Tab, code: &str) -> Result<String> {
         escape(&author.map(|a| format!("by {a}")).unwrap_or_default()),
         escape(code)
     ))
+}
+
+pub fn trade_card(tab: &Tab, code: &str) -> Result<String> {
+    Ok(api(tab, &format!("/v2/calculator/share/{code}"))?.map(|t| trade_html(&t, "Trade Calculator")).unwrap_or_default())
+}
+
+/// Trade ads need a logged-in account: `JBCL_TOKEN` is sent as its Authorization header.
+pub fn trade_ad_card(tab: &Tab, id: &str) -> Result<String> {
+    let Ok(token) = std::env::var("JBCL_TOKEN") else {
+        eprintln!("  no JBCL_TOKEN, can't load trade ad {id}");
+        return Ok(String::new());
+    };
+    let Some(t) = api_as(tab, &format!("/v2/trades/{id}"), Some(&token))? else { return Ok(String::new()) };
+    Ok(trade_html(&t, &ad_footer(id, &t["user"])))
+}
+
+/// The poster's Roblox headshot and name, like the player header on an in-game trade.
+fn ad_footer(id: &str, u: &Value) -> String {
+    let field = |k: &str| u[k].as_str().filter(|s| !s.is_empty() && *s != "None");
+    let name = field("roblox_username").or_else(|| display_name(u)).unwrap_or("Trade Ad");
+    let avatar = field("roblox_avatar").or_else(|| field("avatar_url"));
+    format!(
+        "<span>{}{}</span><span class=\"ad\">Trade Ad #{}</span>",
+        avatar.map(|a| format!("<img src=\"{}\" onerror=\"this.remove()\">", escape(a))).unwrap_or_default(),
+        escape(name),
+        escape(id)
+    )
+}
+
+/// Both sides of a trade as an in-game trade window, padded to 8 slots a row like the game.
+/// `footer` is trusted HTML for the bottom bar.
+fn trade_html(t: &Value, footer: &str) -> String {
+    let side = |key: &str, label: &str| {
+        let items = t[key].as_array().map(Vec::as_slice).unwrap_or_default();
+        let total: f64 = items.iter().map(|i| item_value(i) * i["amount"].as_f64().unwrap_or(1.0)).sum();
+        let mut slots: String = items.iter().map(slot_html).collect();
+        for _ in items.len()..items.len().max(1).div_ceil(8) * 8 {
+            slots.push_str("<div class=\"slot\"><div class=\"orb\"></div></div>");
+        }
+        format!("<div class=\"side\"><div class=\"who\"><span>{label}</span><span>{}</span></div><div class=\"slots\">{slots}</div></div>", money(total))
+    };
+    format!(
+        "<div class=\"trade\">{}{}<div class=\"bar\">{footer}</div></div>",
+        side("offering", "Offering"),
+        side("requesting", "Requesting")
+    )
+}
+
+fn slot_html(i: &Value) -> String {
+    let s = |k: &str| i[k].as_str().unwrap_or_default();
+    let (kind, name) = (s("type"), s("name"));
+    let mut badges = String::new();
+    if let Some(n) = i["amount"].as_u64().filter(|&n| n > 1) {
+        badges += &format!("<i>x{n}</i>");
+    }
+    if i["duped"].as_bool() == Some(true) {
+        badges += "<i>Duped</i>";
+    }
+    if i["og"].as_bool() == Some(true) {
+        badges += "<i>OG</i>";
+    }
+    format!(
+        "<div class=\"slot\"><em>{}</em><b>{}</b><div class=\"orb{}\"><img src=\"{}\" onerror=\"this.remove()\"><span>{badges}</span></div><u>{}</u></div>",
+        escape(kind),
+        escape(&name.replace(" Level ", " Lvl ")),
+        if kind.eq_ignore_ascii_case("vehicle") { " red" } else { " blue" },
+        escape(&item_image(s("id"), kind, name)),
+        money(item_value(i))
+    )
+}
+
+/// Mirrors the site's image paths: numeric ids are catalogue items, anything else is a custom item.
+fn item_image(id: &str, kind: &str, name: &str) -> String {
+    const ITEMS: &str = "https://assets.jailbreakchangelogs.com/assets/images/items/480p";
+    let enc = |s: &str| s.replace('%', "%25").replace(' ', "%20").replace('#', "%23").replace('?', "%3F");
+    let kind = kind.to_lowercase();
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return format!("https://assets.jailbreakchangelogs.com/assets/items/trade_icons/{}.webp", enc(&id.to_lowercase().replace(' ', "_")));
+    }
+    match kind.as_str() {
+        "horn" => "https://assets.jailbreakchangelogs.com/assets/audios/horns/thumbnails/480p/horn_thumbnail.webp".into(),
+        "drift" => format!("{ITEMS}/drifts/thumbnails/{}.webp", enc(name)),
+        "body color" | "furniture" | "hyperchrome" | "rim" | "spoiler" | "texture" | "tire sticker" | "tire style" | "vehicle" | "weapon skin" => {
+            format!("{ITEMS}/{}s/{}.webp", enc(&kind), enc(name))
+        }
+        _ => format!("{ITEMS}/{}/{}.webp", enc(&kind), enc(name)),
+    }
+}
+
+/// Duped items use their duped value when there is one.
+fn item_value(i: &Value) -> f64 {
+    let duped = (i["duped"].as_bool() == Some(true)).then(|| parse_value(i["info"]["duped_value"].as_str()?)).flatten();
+    duped.or_else(|| parse_value(i["info"]["cash_value"].as_str()?)).unwrap_or(0.0)
+}
+
+/// "47m" -> 47_000_000; "N/A" -> None.
+fn parse_value(s: &str) -> Option<f64> {
+    let s = s.trim().to_ascii_lowercase().replace(',', "");
+    let (num, mul) = match s.chars().last()? {
+        'k' => (&s[..s.len() - 1], 1e3),
+        'm' => (&s[..s.len() - 1], 1e6),
+        'b' => (&s[..s.len() - 1], 1e9),
+        _ => (s.as_str(), 1.0),
+    };
+    Some(num.trim().parse::<f64>().ok()? * mul)
+}
+
+/// 47_000_000.0 -> "$47,000,000"
+fn money(v: f64) -> String {
+    let digits = format!("{:.0}", v.max(0.0));
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    format!("${out}")
 }
 
 /// A theme colour is only used if it's a plain colour value, so it can't inject other CSS.
@@ -114,7 +242,38 @@ fn luminance(c: u32) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{css_value, text_color};
+    use super::{ad_footer, css_value, item_image, parse_value, money, text_color, trade_html};
+
+    #[test]
+    fn trade_values() {
+        assert_eq!(parse_value("47m"), Some(47e6));
+        assert_eq!(parse_value("1.5B"), Some(1.5e9));
+        assert_eq!(parse_value("500k"), Some(500e3));
+        assert_eq!(parse_value("N/A"), None);
+        assert_eq!(money(47e6), "$47,000,000");
+        assert_eq!(money(1.25e9), "$1,250,000,000");
+        assert_eq!(money(999.0), "$999");
+        assert_eq!(money(0.0), "$0");
+        assert_eq!(
+            item_image("556", "HyperChrome", "HyperDiamond Level 5"),
+            "https://assets.jailbreakchangelogs.com/assets/images/items/480p/hyperchromes/HyperDiamond%20Level%205.webp"
+        );
+        let t = serde_json::json!({
+            "offering": [{"id": "170", "duped": true, "amount": 2, "name": "Javelin", "type": "Vehicle", "info": {"cash_value": "47m", "duped_value": "43m"}}],
+            "requesting": [{"id": "556", "name": "<b>", "type": "HyperChrome", "info": {"cash_value": "40m"}}]
+        });
+        let html = trade_html(&t, "Trade Calculator");
+        assert!(html.contains("<span>Offering</span><span>$86,000,000</span>"));
+        assert!(html.contains("<i>x2</i><i>Duped</i>"));
+        assert!(html.contains("&lt;b&gt;") && !html.contains("<b><b>"));
+        assert_eq!(html.matches("class=\"slot\"").count(), 16);
+        let user = serde_json::json!({"roblox_username": "KingJ67901", "roblox_avatar": "https://x/a\"b", "global_name": "MyKel"});
+        assert_eq!(
+            ad_footer("58669", &user),
+            "<span><img src=\"https://x/a&quot;b\" onerror=\"this.remove()\">KingJ67901</span><span class=\"ad\">Trade Ad #58669</span>"
+        );
+        assert!(ad_footer("1", &serde_json::json!({"global_name": "MyKel"})).contains("<span>MyKel</span>"));
+    }
 
     #[test]
     fn only_plain_css_colours() {

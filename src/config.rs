@@ -51,6 +51,8 @@ pub struct Embed {
     pub css: String,
     pub user: Option<String>,
     pub theme: Option<String>,
+    pub share: Option<String>,
+    pub trade_ad: Option<String>,
 }
 
 pub fn is_discord_id(s: &str) -> bool {
