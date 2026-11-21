@@ -45,8 +45,14 @@ pub fn theme_card(tab: &Tab, code: &str) -> Result<String> {
     let icon_color = if accent.starts_with('#') { accent.replace('#', "%23") } else { "white".into() };
     let icon_url = format!("https://api.iconify.design/{}.svg?color={icon_color}", icon.replacen(':', "/", 1));
 
+    let backdrop = t["pack"]["background"]
+        .as_str()
+        .filter(|u| u.starts_with("https://uploads.jailbreakchangelogs.com/") && u.bytes().all(|b| b.is_ascii_alphanumeric() || b"/:._-".contains(&b)))
+        .map(|u| format!("<style>body{{background:linear-gradient(#000000c0,#000000c0),url({u}) center/cover fixed {bg}}}.vehicles{{display:none}}</style><img src=\"{u}\" hidden>"))
+        .unwrap_or_default();
+
     Ok(format!(
-        "<div class=\"card\" style=\"--underglow:{accent}\"><div class=\"avatar\" style=\"background:{bg};display:grid;place-items:center;outline:2px solid #ffffff14\">\
+        "{backdrop}<div class=\"card\" style=\"--underglow:{accent}\"><div class=\"avatar\" style=\"background:{bg};display:grid;place-items:center;outline:2px solid #ffffff14\">\
          <img src=\"{}\" style=\"width:110px;height:110px\"></div><div><div class=\"name\">{}</div><div class=\"handle\">{}</div>\
          <span class=\"pill\" style=\"background:{button};color:{button_text}\">Theme {}</span></div></div>",
         escape(&icon_url),
