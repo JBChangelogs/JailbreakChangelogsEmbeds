@@ -216,6 +216,8 @@ fn og_route(url: &str) -> Option<String> {
 
 fn og_embed(cfg: &Config, route: &str) -> Embed {
     let listed = |r: &str| cfg.embeds.iter().find(|e| e.route == r);
+    let theme_page = route.split(['?', '#']).next().unwrap_or(route).strip_prefix("/themes/").filter(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_alphanumeric()));
+    let route = &theme_page.map_or_else(|| route.to_string(), |c| format!("/?theme={c}"));
     let base = route.split(['?', '#']).next().unwrap_or(route);
     let user = base.strip_prefix("/users/").filter(|id| is_discord_id(id));
     let text_from = listed(route).or_else(|| listed(base)).or_else(|| user.and(listed("/")));
@@ -294,6 +296,16 @@ mod tests {
         assert_eq!(query_param("/values?a=1&theme=X#top", "theme"), Some("X"));
         assert_eq!(query_param("/?themes=X", "theme"), None);
         assert_eq!(query_param("/values", "theme"), None);
+    }
+
+    #[test]
+    fn marketplace_theme_renders_home() {
+        let cfg: Config = serde_json::from_value(serde_json::json!({
+            "base_url": "https://x", "out_dir": "out", "delay_ms": 0, "dismiss_buttons": [], "embeds": [{"route": "/", "file": "home.png", "title": "Home"}]
+        })).unwrap();
+        let e = og_embed(&cfg, "/themes/DK32P5WE");
+        assert_eq!((e.route.as_str(), e.theme.as_deref(), e.title.as_str()), ("/?theme=DK32P5WE", Some("DK32P5WE"), "Home"));
+        assert_eq!(og_embed(&cfg, "/themes/a$b").theme, None);
     }
 
     fn wire(response: Resp, head: bool) -> String {
