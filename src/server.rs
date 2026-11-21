@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         mpsc::{sync_channel, Receiver, SyncSender},
-        Arc, Mutex,
+        Arc, Condvar, LazyLock, Mutex,
     },
     thread,
     time::Duration,
@@ -133,18 +133,50 @@ fn route(req: &Request, cfg: &Config, pregen: &Pregen, worker: usize, session: &
 
 fn cached_render(session: &mut Option<Session>, worker: usize, cfg: &Config, route: &str) -> Result<Vec<u8>> {
     let cached = cache_path(route);
-    if is_fresh(&cached) {
-        if let Ok(data) = fs::read(&cached) {
-            return Ok(data);
+    let read_fresh = || is_fresh(&cached).then(|| fs::read(&cached).ok()).flatten();
+    if let Some(data) = read_fresh() {
+        return Ok(data);
+    }
+    let mut render = || {
+        let result = render_on(session, worker, cfg, &og_embed(cfg, route), 1.0);
+        if let Ok(data) = &result {
+            // Written then renamed, so another worker never reads half a file.
+            let tmp = cached.with_extension(format!("{worker}.tmp"));
+            let _ = fs::create_dir_all(cache_dir()).and_then(|_| fs::write(&tmp, data)).and_then(|_| fs::rename(&tmp, &cached));
+        }
+        result
+    };
+    match exclusive(route, &mut render) {
+        Some(result) => result,
+        // Someone else just rendered it (e.g. a pregenerate that Discord caught mid-render); only redo it if theirs failed.
+        None => read_fresh().map_or_else(render, Ok),
+    }
+}
+
+/// Routes being rendered right now, and a signal for when any of them finishes.
+static RENDERING: LazyLock<(Mutex<HashSet<String>>, Condvar)> = LazyLock::new(Default::default);
+
+/// Runs `f` unless `route` is already being rendered elsewhere. In that case it waits for
+/// that render to finish (up to a minute) and returns None, so the caller can use its result.
+fn exclusive<T>(route: &str, f: impl FnOnce() -> T) -> Option<T> {
+    let (rendering, finished) = &*RENDERING;
+    let mut set = rendering.lock().unwrap();
+    if !set.insert(route.to_string()) {
+        let _ = finished.wait_timeout_while(set, Duration::from_secs(60), |s| s.contains(route));
+        return None;
+    }
+    drop(set);
+    // Clears the route even if the render panics, so waiters never hang on it.
+    struct Done<'a>(&'a str);
+    impl Drop for Done<'_> {
+        fn drop(&mut self) {
+            let (rendering, finished) = &*RENDERING;
+            rendering.lock().unwrap().remove(self.0);
+            finished.notify_all();
         }
     }
-    let result = render_on(session, worker, cfg, &og_embed(cfg, route), 1.0);
-    if let Ok(data) = &result {
-        // Written then renamed, so another worker never reads half a file.
-        let tmp = cached.with_extension(format!("{worker}.tmp"));
-        let _ = fs::create_dir_all(cache_dir()).and_then(|_| fs::write(&tmp, data)).and_then(|_| fs::rename(&tmp, &cached));
-    }
-    result
+    let _done = Done(route);
+    Some(f())
 }
 
 /// Rendered og images are kept on disk this long, then deleted by `prune`.
@@ -365,6 +397,20 @@ mod tests {
         assert!(headers.contains("Content-Length: 40000"));
         assert!(headers.contains("Cache-Control: public, max-age=86400"));
         assert!(body.is_empty());
+    }
+
+    #[test]
+    fn renders_once_while_in_flight() {
+        let first = thread::spawn(|| exclusive("/inflight-test", || thread::sleep(Duration::from_millis(300))));
+        thread::sleep(Duration::from_millis(50));
+        let start = std::time::Instant::now();
+        // joins the render already running instead of starting its own, and waits for it
+        assert_eq!(exclusive("/inflight-test", || "rendered twice"), None);
+        assert!(start.elapsed() >= Duration::from_millis(200));
+        assert_eq!(first.join().unwrap(), Some(()));
+        // once it's done the route is free again; other routes are never blocked
+        assert_eq!(exclusive("/inflight-test", || 1), Some(1));
+        assert_eq!(exclusive("/other", || 2), Some(2));
     }
 
     #[test]
