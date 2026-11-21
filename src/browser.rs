@@ -22,7 +22,6 @@ impl Session {
                 .window_size(Some((1920, 1080)))
                 .sandbox(std::env::var_os("NO_SANDBOX").is_none())
                 .idle_browser_timeout(Duration::from_secs(60 * 60 * 24 * 365))
-                // each browser's profile (deleted when it closes) would otherwise grow its HTTP cache for as long as it runs
                 .args(vec![std::ffi::OsStr::new("--disk-cache-size=52428800")])
                 .build()?,
         )?;
@@ -104,7 +103,6 @@ pub fn wait_for_content(tab: &Tab, loading: &[String]) -> Result<()> {
     )
 }
 
-/// A shared theme is fetched after the page loads, then set as inline CSS variables on `<html>`.
 pub fn wait_for_theme(tab: &Tab) -> Result<()> {
     wait_until(tab, "!!document.documentElement.style.getPropertyValue('--color-primary-bg')", "theme")
 }

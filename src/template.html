@@ -133,7 +133,6 @@
       border: 2px solid #ffffff26;
     }
 
-    /* shared calculator trade, styled after the in-game trade window */
     body:has(.trade) .stage,
     body:has(.trade) .text {
       display: none;
@@ -333,12 +332,9 @@
           }
           v.append(span);
         }
-      // easter eggs only go where the shot, text and card don't cover them
       const free = (x, y) => x > 30 && x < 1890 && y > 0 && y < 1080 && !document.elementFromPoint(x, y)?.closest('.shot, .text, .card');
       const pick = list => list[Math.floor(random() * list.length)];
 
-      // J, B, C and L drawn in the background grid itself, each 3x5 cells at its own random spot.
-      // Letter cells drop the brick offset so strokes line up; a one-cell border is cleared around each.
       const letters = [
         ['..#', '..#', '..#', '#.#', '.#.'],
         ['##.', '#.#', '##.', '#.#', '##.'],
@@ -346,7 +342,7 @@
         ['#..', '#..', '#..', '#..', '###'],
       ];
       const cells = [...v.children];
-      const used = new Set(), drawn = new Set(); // letter cells + borders, letter cells only
+      const used = new Set(), drawn = new Set();
       const around = (r, c, f) => {
         for (let dr = -1; dr <= 5; dr++)
           for (let dc = -1; dc <= 3; dc++)
@@ -382,7 +378,7 @@
         const b = s.getBoundingClientRect();
         return s.textContent && !used.has(i) && free(b.x + b.width / 2, b.y + b.height / 2);
       }));
-      if (gold && random() < 0.05) gold.style.color = '#f5c54240'; // ~1 in 20 pages
+      if (gold && random() < 0.05) gold.style.color = '#f5c54240';
     });
   </script>
   <div class="stage"><img class="shot" src="shot.png"></div>

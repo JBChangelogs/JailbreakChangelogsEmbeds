@@ -20,7 +20,6 @@ pub fn render(s: &Session, cfg: &Config, embed: &Embed, scale: f64) -> Result<Ve
         (None, Some(id)) => trade_ad_card(tab, id)?,
         (None, None) => String::new(),
     };
-    // A shared trade is drawn on its own, so the page itself isn't needed.
     let (card, title) = if !trade.is_empty() {
         (trade, embed.title.clone())
     } else {
@@ -47,7 +46,6 @@ pub fn render(s: &Session, cfg: &Config, embed: &Embed, scale: f64) -> Result<Ve
     tab.capture_screenshot(CaptureScreenshotFormatOption::Png, None, None, true).context("screenshotting template")
 }
 
-/// Loads the route, saves its screenshot as shot.png and returns its title.
 fn screenshot_route(s: &Session, cfg: &Config, embed: &Embed) -> Result<String> {
     let tab = &s.tab;
     if !goto(tab, &format!("{}{}", cfg.base_url, embed.route))? {

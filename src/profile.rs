@@ -6,13 +6,10 @@ use crate::{browser::goto, render::escape};
 
 const DEFAULT_ACCENT: u32 = 0x1d7cf2;
 
-/// GETs an API path; None when it answers with an error like `{"detail": "Not Found"}`.
 fn api(tab: &Tab, path: &str) -> Result<Option<Value>> {
     api_as(tab, path, None)
 }
 
-/// With a token, the path is fetched again from inside the API's own origin with it attached,
-/// so the token only ever goes to the API and never to the pages screenshotted later.
 fn api_as(tab: &Tab, path: &str, token: Option<&str>) -> Result<Option<Value>> {
     anyhow::ensure!(goto(tab, &format!("https://api.jailbreakchangelogs.com{path}"))?, "{path} didn't load");
     let read = match token {
@@ -63,7 +60,6 @@ pub fn trade_card(tab: &Tab, code: &str) -> Result<String> {
     Ok(api(tab, &format!("/v2/calculator/share/{code}"))?.map(|t| trade_html(&t, "Trade Calculator")).unwrap_or_default())
 }
 
-/// Trade ads need a logged-in account: `JBCL_TOKEN` is sent as its Authorization header.
 pub fn trade_ad_card(tab: &Tab, id: &str) -> Result<String> {
     let Ok(token) = std::env::var("JBCL_TOKEN") else {
         eprintln!("  no JBCL_TOKEN, can't load trade ad {id}");
@@ -73,7 +69,6 @@ pub fn trade_ad_card(tab: &Tab, id: &str) -> Result<String> {
     Ok(trade_html(&t, &ad_footer(id, &t["user"])))
 }
 
-/// The poster's Roblox headshot and name, like the player header on an in-game trade.
 fn ad_footer(id: &str, u: &Value) -> String {
     let field = |k: &str| u[k].as_str().filter(|s| !s.is_empty() && *s != "None");
     let name = field("roblox_username").or_else(|| display_name(u)).unwrap_or("Trade Ad");
@@ -86,8 +81,6 @@ fn ad_footer(id: &str, u: &Value) -> String {
     )
 }
 
-/// Both sides of a trade as an in-game trade window, padded to 8 slots a row like the game.
-/// `footer` is trusted HTML for the bottom bar.
 fn trade_html(t: &Value, footer: &str) -> String {
     let side = |key: &str, label: &str| {
         let items = t[key].as_array().map(Vec::as_slice).unwrap_or_default();
@@ -128,7 +121,6 @@ fn slot_html(i: &Value) -> String {
     )
 }
 
-/// Mirrors the site's image paths: numeric ids are catalogue items, anything else is a custom item.
 fn item_image(id: &str, kind: &str, name: &str) -> String {
     const ITEMS: &str = "https://assets.jailbreakchangelogs.com/assets/images/items/480p";
     let enc = |s: &str| s.replace('%', "%25").replace(' ', "%20").replace('#', "%23").replace('?', "%3F");
@@ -146,13 +138,11 @@ fn item_image(id: &str, kind: &str, name: &str) -> String {
     }
 }
 
-/// Duped items use their duped value when there is one.
 fn item_value(i: &Value) -> f64 {
     let duped = (i["duped"].as_bool() == Some(true)).then(|| parse_value(i["info"]["duped_value"].as_str()?)).flatten();
     duped.or_else(|| parse_value(i["info"]["cash_value"].as_str()?)).unwrap_or(0.0)
 }
 
-/// "47m" -> 47_000_000; "N/A" -> None.
 fn parse_value(s: &str) -> Option<f64> {
     let s = s.trim().to_ascii_lowercase().replace(',', "");
     let (num, mul) = match s.chars().last()? {
@@ -164,7 +154,6 @@ fn parse_value(s: &str) -> Option<f64> {
     Some(num.trim().parse::<f64>().ok()? * mul)
 }
 
-/// 47_000_000.0 -> "$47,000,000"
 fn money(v: f64) -> String {
     let digits = format!("{:.0}", v.max(0.0));
     let mut out = String::new();
@@ -177,7 +166,6 @@ fn money(v: f64) -> String {
     format!("${out}")
 }
 
-/// A theme colour is only used if it's a plain colour value, so it can't inject other CSS.
 fn css_value(s: &str) -> Option<&str> {
     let ok = !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b" #(),.%-".contains(&b));
     ok.then_some(s)

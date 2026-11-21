@@ -23,13 +23,9 @@ use crate::{
 
 type Resp = Response<Cursor<Vec<u8>>>;
 
-// ponytail: fixed sizes; make them config if pregeneration traffic outgrows them.
-/// Browsers that only work the pregenerate queue, so it never holds up real embed requests.
 const PREGEN_WORKERS: usize = 2;
-/// Requests beyond this many waiting renders get a 503 instead of piling up.
 const PREGEN_QUEUE: usize = 512;
 
-/// Routes waiting to be pregenerated, deduplicated so a burst of the same link renders once.
 pub struct Pregen {
     tx: SyncSender<String>,
     pending: Mutex<HashSet<String>>,
@@ -102,7 +98,6 @@ pub fn serve(cfg: Config) -> Result<()> {
 }
 
 fn handle(req: &Request, cfg: &Config, pregen: &Pregen, worker: usize, session: &mut Option<Session>) -> Resp {
-    // Preserve Content-Length even above tiny_http's default chunking threshold.
     with_header(route(req, cfg, pregen, worker, session).with_chunked_threshold(usize::MAX), "Access-Control-Allow-Origin", "*")
 }
 
@@ -113,9 +108,7 @@ fn route(req: &Request, cfg: &Config, pregen: &Pregen, worker: usize, session: &
     if !matches!(req.method(), Method::Get | Method::Head) {
         return with_header(text(405, "GET or HEAD only"), "Allow", "GET, HEAD, OPTIONS");
     }
-    // `/pregenerate/og/...png` takes the same URL as an embed, renders it in the background and answers straight away.
     if let Some(rest) = req.url().strip_prefix("/pregenerate") {
-        // never cached, or Cloudflare could answer "cached" for a render that has since expired
         let resp = match og_route(rest) {
             Some(route) if is_route(&route) => pregen.enqueue(route),
             _ => text(404, "not found"),
@@ -140,24 +133,19 @@ fn cached_render(session: &mut Option<Session>, worker: usize, cfg: &Config, rou
     let mut render = || {
         let result = render_on(session, worker, cfg, &og_embed(cfg, route), 1.0);
         if let Ok(data) = &result {
-            // Written then renamed, so another worker never reads half a file.
             let tmp = cached.with_extension(format!("{worker}.tmp"));
             let _ = fs::create_dir_all(cache_dir()).and_then(|_| fs::write(&tmp, data)).and_then(|_| fs::rename(&tmp, &cached));
         }
         result
     };
-    match exclusive(route, &mut render) {
+    match exclusive(route, || read_fresh().map_or_else(&mut render, Ok)) {
         Some(result) => result,
-        // Someone else just rendered it (e.g. a pregenerate that Discord caught mid-render); only redo it if theirs failed.
         None => read_fresh().map_or_else(render, Ok),
     }
 }
 
-/// Routes being rendered right now, and a signal for when any of them finishes.
 static RENDERING: LazyLock<(Mutex<HashSet<String>>, Condvar)> = LazyLock::new(Default::default);
 
-/// Runs `f` unless `route` is already being rendered elsewhere. In that case it waits for
-/// that render to finish (up to a minute) and returns None, so the caller can use its result.
 fn exclusive<T>(route: &str, f: impl FnOnce() -> T) -> Option<T> {
     let (rendering, finished) = &*RENDERING;
     let mut set = rendering.lock().unwrap();
@@ -166,7 +154,6 @@ fn exclusive<T>(route: &str, f: impl FnOnce() -> T) -> Option<T> {
         return None;
     }
     drop(set);
-    // Clears the route even if the render panics, so waiters never hang on it.
     struct Done<'a>(&'a str);
     impl Drop for Done<'_> {
         fn drop(&mut self) {
@@ -179,12 +166,9 @@ fn exclusive<T>(route: &str, f: impl FnOnce() -> T) -> Option<T> {
     Some(f())
 }
 
-/// Rendered og images are kept on disk this long, then deleted by `prune`.
 const CACHE_TTL: Duration = Duration::from_secs(3 * 60 * 60);
-// ponytail: fixed cap with oldest-first eviction; make it configurable if the disk gets roomier.
 const CACHE_MAX_BYTES: u64 = 10 << 30;
 
-/// In the container's temp dir, so a redeploy (and any template change) starts it empty.
 fn cache_dir() -> PathBuf {
     std::env::temp_dir().join("embedgen-cache")
 }
@@ -199,7 +183,6 @@ fn is_fresh(path: &Path) -> bool {
     fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age < CACHE_TTL)
 }
 
-/// Drops expired renders, then the oldest ones until the cache fits under `max_bytes`.
 fn prune(dir: &Path, ttl: Duration, max_bytes: u64) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     let mut files: Vec<_> = entries
@@ -219,8 +202,6 @@ fn prune(dir: &Path, ttl: Duration, max_bytes: u64) {
     }
 }
 
-/// `/og/a/b.png?x=1` or `/og/a/b?x=1.png` -> `/a/b?x=1`. Browsers never send a raw `#`,
-/// so fragments come in as `%23` and are turned back into `#` here.
 fn og_route(url: &str) -> Option<String> {
     let rest = url.strip_prefix("/og")?;
     let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
@@ -373,10 +354,8 @@ mod tests {
                 assert!(output.contains("Allow: GET, HEAD, OPTIONS"));
             }
         }
-        // the repeated share=A was deduplicated; nothing rendered on the request thread
         assert_eq!(queue.try_iter().collect::<Vec<_>>(), ["/embedgen-test?share=A", "/embedgen-test?share=B"]);
         assert!(session.is_none());
-        // an already cached render isn't queued again
         let cached = cache_path("/embedgen-test?share=C");
         fs::create_dir_all(cache_dir()).unwrap();
         fs::write(&cached, b"png").unwrap();
@@ -404,11 +383,9 @@ mod tests {
         let first = thread::spawn(|| exclusive("/inflight-test", || thread::sleep(Duration::from_millis(300))));
         thread::sleep(Duration::from_millis(50));
         let start = std::time::Instant::now();
-        // joins the render already running instead of starting its own, and waits for it
         assert_eq!(exclusive("/inflight-test", || "rendered twice"), None);
         assert!(start.elapsed() >= Duration::from_millis(200));
         assert_eq!(first.join().unwrap(), Some(()));
-        // once it's done the route is free again; other routes are never blocked
         assert_eq!(exclusive("/inflight-test", || 1), Some(1));
         assert_eq!(exclusive("/other", || 2), Some(2));
     }
@@ -421,7 +398,6 @@ mod tests {
             fs::write(dir.join(name), [0u8; 10]).unwrap();
             thread::sleep(Duration::from_millis(20));
         }
-        // 25 bytes fits the two newest files
         prune(&dir, Duration::from_secs(60), 25);
         let left = |n: &str| dir.join(n).exists();
         assert!(!left("old") && left("mid") && left("new"));
