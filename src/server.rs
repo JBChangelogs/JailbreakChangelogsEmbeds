@@ -148,7 +148,7 @@ fn cached_render(session: &mut Option<Session>, worker: usize, cfg: &Config, rou
 /// Rendered og images are kept on disk this long, then deleted by `prune`.
 const CACHE_TTL: Duration = Duration::from_secs(3 * 60 * 60);
 // ponytail: fixed cap with oldest-first eviction; make it configurable if the disk gets roomier.
-const CACHE_MAX_BYTES: u64 = 1 << 30;
+const CACHE_MAX_BYTES: u64 = 10 << 30;
 
 /// In the container's temp dir, so a redeploy (and any template change) starts it empty.
 fn cache_dir() -> PathBuf {
