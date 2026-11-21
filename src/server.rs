@@ -115,10 +115,12 @@ fn route(req: &Request, cfg: &Config, pregen: &Pregen, worker: usize, session: &
     }
     // `/pregenerate/og/...png` takes the same URL as an embed, renders it in the background and answers straight away.
     if let Some(rest) = req.url().strip_prefix("/pregenerate") {
-        return match og_route(rest) {
+        // never cached, or Cloudflare could answer "cached" for a render that has since expired
+        let resp = match og_route(rest) {
             Some(route) if is_route(&route) => pregen.enqueue(route),
             _ => text(404, "not found"),
         };
+        return with_header(resp, "Cache-Control", "no-store");
     }
     if let Some(route) = og_route(req.url()) {
         if !is_route(&route) {
@@ -347,7 +349,8 @@ mod tests {
         fs::create_dir_all(cache_dir()).unwrap();
         fs::write(&cached, b"png").unwrap();
         let request: Request = TestRequest::new().with_path("/pregenerate/og/embedgen-test.png?share=C").into();
-        assert!(wire(handle(&request, &cfg, &pregen, 0, &mut session), false).starts_with("HTTP/1.1 200"));
+        let output = wire(handle(&request, &cfg, &pregen, 0, &mut session), false);
+        assert!(output.starts_with("HTTP/1.1 200") && output.contains("Cache-Control: no-store"));
         fs::remove_file(cached).unwrap();
         fs::remove_dir_all(out).unwrap();
     }
