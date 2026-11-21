@@ -66,18 +66,17 @@ pub fn trade_ad_card(tab: &Tab, id: &str) -> Result<String> {
         return Ok(String::new());
     };
     let Some(t) = api_as(tab, &format!("/v2/trades/{id}"), Some(&token))? else { return Ok(String::new()) };
-    Ok(trade_html(&t, &ad_footer(id, &t["user"])))
+    Ok(trade_html(&t, &ad_footer(&t["user"])))
 }
 
-fn ad_footer(id: &str, u: &Value) -> String {
+fn ad_footer(u: &Value) -> String {
     let field = |k: &str| u[k].as_str().filter(|s| !s.is_empty() && *s != "None");
     let name = field("roblox_username").or_else(|| display_name(u)).unwrap_or("Trade Ad");
     let avatar = field("roblox_avatar").or_else(|| field("avatar_url"));
     format!(
-        "<span>{}{}</span><span class=\"ad\">Trade Ad #{}</span>",
+        "{}{}",
         avatar.map(|a| format!("<img src=\"{}\" onerror=\"this.remove()\">", escape(a))).unwrap_or_default(),
-        escape(name),
-        escape(id)
+        escape(name)
     )
 }
 
@@ -92,7 +91,7 @@ fn trade_html(t: &Value, footer: &str) -> String {
         format!("<div class=\"side\"><div class=\"who\"><span>{label}</span><span>{}</span></div><div class=\"slots\">{slots}</div></div>", money(total))
     };
     format!(
-        "<div class=\"trade\">{}{}<div class=\"bar\">{footer}</div></div>",
+        "<div class=\"trade\">{}{}<div class=\"bar\"><span>{footer}</span><img class=\"logo\" src=\"https://assets.jailbreakchangelogs.com/assets/logos/JBCL_Long_Transparent.webp\"></div></div>",
         side("offering", "Offering"),
         side("requesting", "Requesting")
     )
@@ -257,10 +256,10 @@ mod tests {
         assert_eq!(html.matches("class=\"slot\"").count(), 16);
         let user = serde_json::json!({"roblox_username": "KingJ67901", "roblox_avatar": "https://x/a\"b", "global_name": "MyKel"});
         assert_eq!(
-            ad_footer("58669", &user),
-            "<span><img src=\"https://x/a&quot;b\" onerror=\"this.remove()\">KingJ67901</span><span class=\"ad\">Trade Ad #58669</span>"
+            ad_footer(&user),
+            "<img src=\"https://x/a&quot;b\" onerror=\"this.remove()\">KingJ67901"
         );
-        assert!(ad_footer("1", &serde_json::json!({"global_name": "MyKel"})).contains("<span>MyKel</span>"));
+        assert!(ad_footer(&serde_json::json!({"global_name": "MyKel"})) == "MyKel");
     }
 
     #[test]

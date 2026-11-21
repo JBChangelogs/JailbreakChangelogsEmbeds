@@ -147,7 +147,6 @@
       display: grid;
       gap: 22px;
       font-family: Bangers, sans-serif;
-      font-style: italic;
       text-transform: uppercase;
       letter-spacing: 1px;
     }
@@ -299,8 +298,12 @@
       background: #555;
     }
 
-    .bar .ad {
-      color: #aaa;
+    .bar .logo {
+      width: auto;
+      height: 60px;
+      margin: 0;
+      border-radius: 0;
+      background: none;
     }
 
     /* {css} */
@@ -388,7 +391,7 @@
   </div>
   <!-- {card} -->
   <script>
-    window.layoutDone = Promise.all([window.layoutDone, document.fonts.load('800 68px Inter'), document.fonts.load('500 40px Inter'), document.fonts.load('italic 40px Bangers')]).then(() => {
+    window.layoutDone = Promise.all([window.layoutDone, document.fonts.load('800 68px Inter'), document.fonts.load('500 40px Inter'), document.fonts.load('40px Bangers')]).then(() => {
       const trade = document.querySelector('.trade');
       if (trade) trade.style.setProperty('--fit', Math.min(1, 1030 / trade.offsetHeight));
       for (const el of document.querySelectorAll('.name, .handle, .slot b, .slot u')) {
