@@ -1,15 +1,13 @@
 use std::{
-    collections::HashSet,
+    cell::RefCell,
+    collections::{HashSet, VecDeque},
     fs,
     hash::{DefaultHasher, Hash, Hasher},
     io::Cursor,
     path::{Path, PathBuf},
-    sync::{
-        mpsc::{sync_channel, Receiver, SyncSender},
-        Arc, Condvar, LazyLock, Mutex,
-    },
+    sync::{Arc, Condvar, LazyLock, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -17,40 +15,56 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::{
     browser::Session,
+    clickhouse,
     config::{is_discord_id, is_route, Config, Embed},
     render::render,
 };
 
 type Resp = Response<Cursor<Vec<u8>>>;
 
-const PREGEN_WORKERS: usize = 2;
+const PREGEN_WORKERS: usize = 4;
 const PREGEN_QUEUE: usize = 512;
 
+#[derive(Default)]
 pub struct Pregen {
-    tx: SyncSender<String>,
-    pending: Mutex<HashSet<String>>,
+    state: Mutex<PregenState>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct PregenState {
+    queue: VecDeque<String>,
+    pending: HashSet<String>,
 }
 
 impl Pregen {
-    fn new() -> (Self, Receiver<String>) {
-        let (tx, rx) = sync_channel(PREGEN_QUEUE);
-        (Self { tx, pending: Mutex::default() }, rx)
-    }
-
     fn enqueue(&self, route: String) -> Resp {
         if is_fresh(&cache_path(&route)) {
             return text(200, "cached");
         }
-        if !self.pending.lock().unwrap().insert(route.clone()) {
+        let mut s = self.state.lock().unwrap();
+        if let Some(i) = s.queue.iter().position(|r| *r == route) {
+            s.queue.remove(i);
+        } else if !s.pending.insert(route.clone()) {
             return text(202, "queued");
-        }
-        match self.tx.try_send(route.clone()) {
-            Ok(()) => text(202, "queued"),
-            Err(_) => {
-                self.pending.lock().unwrap().remove(&route);
-                text(503, "pregenerate queue full")
+        } else if s.queue.len() >= PREGEN_QUEUE {
+            if let Some(stale) = s.queue.pop_front() {
+                s.pending.remove(&stale);
             }
         }
+        s.queue.push_back(route);
+        self.ready.notify_one();
+        text(202, "queued")
+    }
+
+    fn next(&self) -> String {
+        let s = self.state.lock().unwrap();
+        let mut s = self.ready.wait_while(s, |s| s.queue.is_empty()).unwrap();
+        s.queue.pop_back().unwrap()
+    }
+
+    fn done(&self, route: &str) {
+        self.state.lock().unwrap().pending.remove(route);
     }
 }
 
@@ -65,16 +79,16 @@ pub fn serve(cfg: Config) -> Result<()> {
     });
 
     let cfg = Arc::new(cfg);
-    let (pregen, rx) = Pregen::new();
-    let (pregen, rx) = (Arc::new(pregen), Arc::new(Mutex::new(rx)));
+    let pregen = Arc::new(Pregen::default());
     for i in 0..PREGEN_WORKERS {
-        let (cfg, pregen, rx) = (cfg.clone(), pregen.clone(), rx.clone());
+        let (cfg, pregen) = (cfg.clone(), pregen.clone());
         thread::spawn(move || {
-            let (worker, mut session) = (cfg.concurrency + i, None);
+            let worker = cfg.concurrency + i;
+            let mut session = Session::launch(worker).ok();
             loop {
-                let Ok(route) = rx.lock().unwrap().recv() else { return };
+                let route = pregen.next();
                 let _ = cached_render(&mut session, worker, &cfg, &route);
-                pregen.pending.lock().unwrap().remove(&route);
+                pregen.done(&route);
             }
         });
     }
@@ -83,10 +97,20 @@ pub fn serve(cfg: Config) -> Result<()> {
         .map(|worker| {
             let (server, cfg, pregen) = (server.clone(), cfg.clone(), pregen.clone());
             thread::spawn(move || {
-                let mut session = None;
+                let mut session = Session::launch(worker).ok();
                 for req in server.incoming_requests() {
+                    let start = Instant::now();
                     let resp = handle(&req, &cfg, &pregen, worker, &mut session);
+                    let row = clickhouse::enabled().then(|| clickhouse::row(&req, resp.status_code().0));
                     let _ = req.respond(resp);
+                    let error = LAST_ERROR.take();
+                    if let Some(mut row) = row {
+                        row["duration_ms"] = (start.elapsed().as_millis() as u64).into();
+                        if row["status_code"].as_u64() >= Some(500) {
+                            row["error"] = error.unwrap_or_default().into();
+                        }
+                        clickhouse::send(row);
+                    }
                 }
             })
         })
@@ -256,6 +280,10 @@ fn pregenerated(path: &str, cfg: &Config) -> Resp {
     }
 }
 
+thread_local! {
+    static LAST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
 fn render_on(session: &mut Option<Session>, worker: usize, cfg: &Config, embed: &Embed, scale: f64) -> Result<Vec<u8>> {
     if session.is_none() {
         *session = Some(Session::launch(worker)?);
@@ -265,6 +293,7 @@ fn render_on(session: &mut Option<Session>, worker: usize, cfg: &Config, embed: 
         Ok(_) => println!("rendered {}", embed.route),
         Err(e) => {
             eprintln!("FAIL {}: {e:#}", embed.route);
+            LAST_ERROR.set(Some(format!("{e:#}")));
             *session = None;
         }
     }
@@ -327,7 +356,7 @@ mod tests {
             "embeds": [{"route": "/values", "file": "values.png"}]
         })).unwrap();
         let mut session = None;
-        let (pregen, queue) = Pregen::new();
+        let pregen = Pregen::default();
         for (path, content_type) in [("/values.png", "image/png"), ("/embeds.mp4", "video/mp4")] {
             for method in [Method::Get, Method::Head] {
                 let head = method == Method::Head;
@@ -366,7 +395,8 @@ mod tests {
                 assert!(output.contains("Allow: GET, HEAD, OPTIONS"));
             }
         }
-        assert_eq!(queue.try_iter().collect::<Vec<_>>(), ["/embedgen-test?share=A", "/embedgen-test?share=B"]);
+        assert_eq!(pregen.next(), "/embedgen-test?share=B");
+        assert_eq!(pregen.next(), "/embedgen-test?share=A");
         assert!(session.is_none());
         let cached = cache_path("/embedgen-test?share=C");
         fs::create_dir_all(cache_dir()).unwrap();
@@ -417,6 +447,24 @@ mod tests {
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
         fs::remove_dir_all(dir).unwrap();
         assert_ne!(cache_path("/values?share=A"), cache_path("/values?share=B"));
+    }
+
+    #[test]
+    fn non_ascii_request_gets_a_response() {
+        use std::io::{Read, Write};
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        thread::spawn(move || {
+            for r in server.incoming_requests() {
+                let url = r.url().to_string();
+                let _ = r.respond(Response::from_string(url));
+            }
+        });
+        let mut s = std::net::TcpStream::connect(addr).unwrap();
+        s.write_all("GET /item/caf\u{e9} HTTP/1.1\r\nUser-Agent: caf\u{e9}\r\nConnection: close\r\n\r\n".as_bytes()).unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        assert!(out.starts_with("HTTP/1.1 200") && out.ends_with("/item/caf%C3%A9"), "{out}");
     }
 
     #[test]

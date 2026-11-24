@@ -1,4 +1,5 @@
 mod browser;
+mod clickhouse;
 mod config;
 mod profile;
 mod render;
@@ -24,7 +25,10 @@ fn main() -> Result<()> {
         .with_context(|| format!("parsing {path}"))?;
     match cmd.as_deref() {
         Some("video") => video::make_video(&cfg),
-        Some("serve") => server::serve(cfg),
+        Some("serve") => {
+            clickhouse::init();
+            server::serve(cfg)
+        }
         _ => pregenerate(&cfg),
     }
 }
