@@ -1,0 +1,18 @@
+name: embedgen
+
+services:
+  embedgen:
+    image: embedgen:local
+    pull_policy: build
+    build:
+      context: ..
+    container_name: embedgen
+    restart: unless-stopped
+    mem_limit: 8g
+    cpus: 4
+    env_file: .env
+    ports:
+      - "127.0.0.1:8140:8080"
+    volumes:
+      - /opt/jbcl/embedgen/embeds.json:/app/embeds.json:ro
+      - /opt/jbcl/embedgen/out:/app/out:ro
